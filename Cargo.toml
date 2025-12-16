@@ -36,6 +36,11 @@ flume = "0.12.0"
 fs_extra = "1.3"
 walkdir = "2.3"
 notify = "8.2.0"
+# Para emulação precisa do PSG (SN76489)
+# O crate `psg` emula o AY-3-8910/YM2149, que é um chip similar e de alta precisão.
+psg = "1.0.1"
+# Para sincronização, uma alternativa mais leve e rápida para std::sync::{Arc, Mutex}
+parking_lot = "0.12"
 
 
 [profile.dev]
