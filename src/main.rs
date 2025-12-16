@@ -14,7 +14,7 @@ use io::Io;
 fn main() {
     let sound = Arc::new(Mutex::new(Sound::new()));
     let z80 = Arc::new(Mutex::new(Z80::new(sound.clone())));
-    let vdp = Arc::new(Mutex::new(Vdp::new()));
+    let vdp = Arc::new(Mutex::new(Vdp::new(false)));
 
     let mut io = Io::new(z80.clone(), vdp.clone(), sound.clone());
 

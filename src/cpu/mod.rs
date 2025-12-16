@@ -3,7 +3,8 @@
 pub mod z80;
 use std::sync::{Arc, Mutex};
 use crate::sound::Sound;
-use crate::vdp::{Vdp, interrupts::VdpInterrupt};
+use crate::vdp::Vdp;
+use crate::vdp::VdpInterruptType;
 use crate::cpu::z80::Z80;
 
 pub struct Cpu {
@@ -25,11 +26,23 @@ impl Cpu {
 
         if let Some(interrupt) = self.vdp.lock().unwrap().poll_interrupt() {
             match interrupt {
-                VdpInterrupt::VBlank => {
+                VdpInterruptType::VBlank => {
                     // trata interrupção de VBlank
                 }
-                VdpInterrupt::HBlank => {
+                VdpInterruptType::HBlank => {
                     // trata interrupção de HBlank
+                }
+                VdpInterruptType::Scanline => {
+                    // trata interrupção de Scanline
+                }
+                VdpInterruptType::SpriteOverflow => {
+                    // trata interrupção de SpriteOverflow
+                }
+                VdpInterruptType::SpriteCollision => {
+                    // trata interrupção de SpriteCollision
+                }
+                VdpInterruptType::DmaComplete => {
+                    // trata interrupção de DmaComplete
                 }
             }
         }
