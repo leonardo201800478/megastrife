@@ -11,7 +11,7 @@
 use crate::vdp::{
     cram::Cram,
     framebuffer::FrameBuffer,
-    modes::VdpVideoMode,
+    video_modes::VdpVideoMode,
     registers::VdpRegisters,
     vram::Vram,
 };

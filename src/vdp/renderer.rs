@@ -15,7 +15,7 @@
 use crate::vdp::{
     cram::Cram,
     framebuffer::FrameBuffer,
-    modes::{VdpVideoMode, VdpRenderMode},
+    video_modes::{VdpVideoMode, VdpRenderMode},
     planes::{Plane, PlaneManager, PlaneType},
     registers::VdpRegisters,
     sprite::SpriteTable,
@@ -595,7 +595,7 @@ pub struct RenderStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vdp::modes::VdpVideoMode;
+    use crate::vdp::video_modes::VdpVideoMode;
     use crate::vdp::registers::VdpRegisters;
     use crate::vdp::sprite::{Sprite, SpriteSize, SpriteTable};
     

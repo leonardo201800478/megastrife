@@ -15,7 +15,7 @@
 use crate::vdp::{
     cram::Cram,
     framebuffer::FrameBuffer,
-    modes::{VdpVideoMode, VdpRenderMode},
+    video_modes::{VdpVideoMode, VdpRenderMode},
     registers::VdpRegisters,
     vram::Vram,
     vsram::Vsram,
@@ -539,7 +539,7 @@ impl PlaneManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vdp::modes::VdpVideoMode;
+    use crate::vdp::video_modes::VdpVideoMode;
     use crate::vdp::registers::VdpRegisters;
 
     fn create_test_registers() -> VdpRegisters {
