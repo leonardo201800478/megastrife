@@ -1,0 +1,6 @@
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-cpu=native"]
+
+# Or for all Windows targets:
+[target.'cfg(target_os = "windows")']
+rustflags = ["-C", "target-cpu=native"]
