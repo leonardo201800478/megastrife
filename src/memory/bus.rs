@@ -1,51 +1,75 @@
-//! Interface de barramento de memória
+// src/memory/bus.rs
+use crate::cpu::z80::Z80;
+use crate::memory::{Mapper, Ram, Rom};
+use crate::sound::Sound;
+use crate::vdp::Vdp;
+use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
-
-/// Interface para acesso à memória
-pub trait MemoryBus {
-    /// Lê um byte do endereço especificado
-    fn read_byte(&self, address: u32) -> Result<u8>;
-    
-    /// Lê uma palavra (16 bits) do endereço especificado
-    fn read_word(&self, address: u32) -> Result<u16>;
-    
-    /// Lê uma palavra longa (32 bits) do endereço especificado
-    fn read_long(&self, address: u32) -> Result<u32>;
-    
-    /// Escreve um byte no endereço especificado
-    fn write_byte(&mut self, address: u32, value: u8) -> Result<()>;
-    
-    /// Escreve uma palavra (16 bits) no endereço especificado
-    fn write_word(&mut self, address: u32, value: u16) -> Result<()>;
-    
-    /// Escreve uma palavra longa (32 bits) no endereço especificado
-    fn write_long(&mut self, address: u32, value: u32) -> Result<()>;
+pub struct Bus {
+    pub z80: Arc<Mutex<Z80>>,
+    pub vdp: Arc<Mutex<Vdp>>,
+    pub sound: Arc<Mutex<Sound>>,
+    pub ram: Arc<Mutex<Ram>>,
+    pub rom: Arc<Mutex<Rom>>,
+    pub mapper: Arc<Mutex<Mapper>>,
 }
 
-/// Implementação padrão para MemoryBus
-impl MemoryBus for crate::memory::MemorySystem {
-    fn read_byte(&self, address: u32) -> Result<u8> {
-        self.read_byte(address)
+impl Bus {
+    pub fn new(
+        z80: Arc<Mutex<Z80>>,
+        vdp: Arc<Mutex<Vdp>>,
+        sound: Arc<Mutex<Sound>>,
+        ram: Arc<Mutex<Ram>>,
+        rom: Arc<Mutex<Rom>>,
+        mapper: Arc<Mutex<Mapper>>,
+    ) -> Self {
+        Self {
+            z80,
+            vdp,
+            sound,
+            ram,
+            rom,
+            mapper,
+        }
     }
-    
-    fn read_word(&self, address: u32) -> Result<u16> {
-        self.read_word(address)
+
+    pub fn read8(&self, addr: u32) -> u8 {
+        match addr {
+            0xA00000..=0xA0FFFF => self.z80.lock().unwrap().read_byte(addr as u16),
+            0xC00000..=0xC0001F => self.vdp.lock().unwrap().bus_read(addr),
+            0xFF0000..=0xFFFFFF => self.ram.lock().unwrap().read8(addr),
+            _ => 0,
+        }
     }
-    
-    fn read_long(&self, address: u32) -> Result<u32> {
-        self.read_long(address)
+
+    pub fn write8(&self, addr: u32, value: u8) {
+        match addr {
+            0xA00000..=0xA0FFFF => self.z80.lock().unwrap().write_byte(addr as u16, value),
+            0xC00000..=0xC0003F => self.vdp.lock().unwrap().bus_write(addr, value),
+            0xFF0000..=0xFFFFFF => self.ram.lock().unwrap().write8(addr, value),
+            _ => {}
+        }
     }
-    
-    fn write_byte(&mut self, address: u32, value: u8) -> Result<()> {
-        self.write_byte(address, value)
+
+    pub fn tick(&self) {
+        self.vdp.lock().unwrap().tick();
+        self.sound.lock().unwrap().tick();
     }
-    
-    fn write_word(&mut self, address: u32, value: u16) -> Result<()> {
-        self.write_word(address, value)
+
+    pub fn render_frame(&self) -> Vec<u32> {
+        let mut vdp = self.vdp.lock().unwrap();
+        vdp.render_frame();
+        vdp.framebuffer.pixels.clone()
     }
-    
-    fn write_long(&mut self, address: u32, value: u32) -> Result<()> {
-        self.write_long(address, value)
+
+    pub fn read16(&self, addr: u32) -> u16 {
+        let lo = self.read8(addr) as u16;
+        let hi = self.read8(addr + 1) as u16;
+        (hi << 8) | lo
+    }
+
+    pub fn write16(&self, addr: u32, value: u16) {
+        self.write8(addr, (value & 0xFF) as u8);
+        self.write8(addr + 1, (value >> 8) as u8);
     }
 }

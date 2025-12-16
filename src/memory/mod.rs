@@ -1,299 +1,136 @@
-//! Sistema de memória do Sega Genesis/Mega Drive
+//! Subsistema de memória principal do Mega Drive / Sega Genesis.
+//!
+//! Este módulo unifica todos os componentes de memória e periféricos
+//! conectados ao barramento do Motorola 68000:
+//!
+//! - ROM (via Mapper, com suporte a cartuchos especiais)
+//! - RAM principal
+//! - VDP (vídeo e CRAM)
+//! - Som (FM e PSG)
+//! - I/O (portas, controladores, interface com Z80)
+//!
+//! Também fornece funções convenientes para leitura, escrita e
+//! atualização por ciclo (tick/frame).
 
-mod bus;
-mod ram;
-mod rom;
-mod mapper;
+pub mod bus;
+pub mod mapper;
+pub mod ram;
+pub mod rom;
 
-pub use bus::MemoryBus;
-pub use ram::{WorkRam, VideoRam, SoundRam};
-pub use rom::{Cartridge, RomHeader};
-pub use mapper::MemoryMapper;
+use bus::*;
+use mapper::*;
+use ram::*;
+use rom::*;
+use crate::vdp::Vdp;
+use crate::sound::Sound;
+use crate::io::Io;
+use crate::cpu::z80::Z80;
 
-use anyhow::{Result, Context, bail};
-use log::{debug, info, warn, trace};
-
-/// Sistema completo de memória do Genesis
-pub struct MemorySystem {
-    /// RAM de trabalho (64KB)
-    work_ram: WorkRam,
-    
-    /// RAM de vídeo (64KB)
-    vram: VideoRam,
-    
-    /// RAM de som (8KB)
-    sound_ram: SoundRam,
-    
-    /// Cartucho ROM
-    cartridge: Option<Cartridge>,
-    
-    /// Mapeador de memória
-    mapper: MemoryMapper,
-    
-    /// BIOS do sistema (opcional)
-    bios: Option<Vec<u8>>,
-    
-    /// Registradores de I/O
-    io_registers: [u8; 0x100],
+/// Estrutura de alto nível que representa o sistema de memória
+/// unificado do Mega Drive.
+pub struct Memory {
+    pub bus: Bus,
 }
 
-impl MemorySystem {
-    /// Cria um novo sistema de memória
-    pub fn new() -> Self {
-        Self {
-            work_ram: WorkRam::new(),
-            vram: VideoRam::new(),
-            sound_ram: SoundRam::new(),
-            cartridge: None,
-            mapper: MemoryMapper::new(),
-            bios: None,
-            io_registers: [0; 0x100],
-        }
+impl Memory {
+    /// Cria uma nova instância completa do subsistema de memória,
+    /// com barramento, VDP, som e I/O inicializados.
+    ///
+    /// # Parâmetros
+    /// - `rom_data`: conteúdo bruto da ROM (carregado do cartucho)
+    /// - `ram_size`: tamanho da RAM principal (normalmente 64 KB)
+    /// - `mapper_type`: define o tipo de mapeamento (Standard, SegaMapper, etc.)
+    /// - `sound_rate`: taxa de amostragem do áudio (ex: 44100 Hz)
+    pub fn new(rom_data: Vec<u8>, ram_size: usize, mapper_type: MapperType, sound_rate: u32) -> Self {
+        let rom = Rom::new(rom_data);
+        let mapper = Mapper::new(rom, mapper_type);
+        let vdp = Vdp::new();
+        let bus = Bus::new(mapper, ram_size, vdp, sound_rate);
+        Self { bus }
     }
-    
-    /// Carrega uma ROM de cartucho
-    pub fn load_cartridge(&mut self, rom_data: Vec<u8>) -> Result<()> {
-        info!("Loading cartridge ROM: {} bytes", rom_data.len());
-        
-        let cartridge: Cartridge = Cartridge::new(rom_data)?;
-        let header: &RomHeader = cartridge.get_header();
-        
-        info!("Cartridge Info:");
-        info!("  Title: {}", header.title);
-        info!("  Region: {:?}", header.region);
-        info!("  ROM Size: {} KB", header.rom_size_kb);
-        info!("  RAM Size: {} KB", header.ram_size_kb);
-        info!("  Checksum: {:04X}", header.checksum);
-        
-        self.cartridge = Some(cartridge);
-        
-        // Configura mapeamento baseado no cartucho
-        self.mapper.configure(&self.cartridge.as_ref().unwrap());
-        
-        Ok(())
+
+    // =====================================================
+    // LEITURA / ESCRITA
+    // =====================================================
+
+    /// Lê um byte (8 bits) da memória mapeada.
+pub fn read8(&self, addr: u32) -> Option<u8> {
+    Some(self.bus.read8(addr))
+}
+
+    /// Lê uma palavra (16 bits) da memória mapeada.
+    pub fn read16(&self, addr: u32) -> Option<u16> {
+        Some(self.bus.read16(addr))
     }
-    
-    /// Carrega BIOS (opcional)
-    pub fn load_bios(&mut self, bios_data: Vec<u8>) -> Result<()> {
-        if bios_data.len() != 0x2000 && bios_data.len() != 0x4000 {
-            bail!("BIOS must be 8KB or 16KB, got {} bytes", bios_data.len());
-        }
-        
-        self.bios = Some(bios_data);
-        debug!("BIOS loaded: {} bytes", self.bios.as_ref().unwrap().len());
-        Ok(())
+
+    /// Escreve um byte na memória mapeada.
+    pub fn write8(&self, addr: u32, value: u8) {
+        let _ = self.bus.write8(addr, value);
     }
-    
-    /// Reseta o sistema de memória
-    pub fn reset(&mut self) {
-        debug!("Resetting memory system");
-        
-        self.work_ram.clear();
-        self.vram.clear();
-        self.sound_ram.clear();
-        self.io_registers = [0; 0x100];
-        
-        // Inicializa alguns registros de I/O com valores padrão
-        self.io_registers[0x00] = 0x00; // Version register
-        self.io_registers[0x01] = 0x00; // Peripheral control
-        self.io_registers[0x02] = 0x00; // TMSS register
+
+    /// Escreve uma palavra (16 bits) na memória mapeada.
+    pub fn write16(&self, addr: u32, value: u16) {
+        let _ = self.bus.write16(addr, value);
     }
-    
-    /// Obtém informações sobre o cartucho
-    pub fn get_cartridge_info(&self) -> Option<&RomHeader> {
-        self.cartridge.as_ref().map(|c| c.get_header())
+
+    // =====================================================
+    // CICLOS / ATUALIZAÇÃO
+    // =====================================================
+
+    /// Atualiza o barramento e todos os periféricos a cada ciclo.
+    /// Deve ser chamado uma vez por passo da CPU.
+    pub fn tick(&self) {
+        self.bus.tick();
     }
-    
-    /// Lê um byte da memória (interface para CPU)
-    pub fn read_byte(&self, address: u32) -> Result<u8> {
-        let mapped: mapper::MappedAddress = self.mapper.map_address(address);
-        
-        match mapped.region {
-            mapper::MemoryRegion::Bios => {
-                if let Some(bios) = &self.bios {
-                    let offset: usize = mapped.offset as usize;
-                    if offset < bios.len() {
-                        Ok(bios[offset])
-                    } else {
-                        Ok(0xFF)
-                    }
-                } else {
-                    Ok(0xFF) // Sem BIOS, retorna 0xFF
-                }
-            }
-            mapper::MemoryRegion::WorkRam => {
-                self.work_ram.read_byte(mapped.offset)
-            }
-            mapper::MemoryRegion::VideoRam => {
-                self.vram.read_byte(mapped.offset)
-            }
-            mapper::MemoryRegion::SoundRam => {
-                self.sound_ram.read_byte(mapped.offset)
-            }
-            mapper::MemoryRegion::CartridgeRom => {
-                if let Some(cart) = &self.cartridge {
-                    cart.read_byte(mapped.offset)
-                } else {
-                    Ok(0xFF) // Sem cartucho
-                }
-            }
-            mapper::MemoryRegion::CartridgeRam => {
-                if let Some(cart) = &self.cartridge {
-                    cart.read_sram(mapped.offset)
-                } else {
-                    Ok(0xFF)
-                }
-            }
-            mapper::MemoryRegion::IoRegisters => {
-                let offset: usize = mapped.offset as usize;
-                if offset < self.io_registers.len() {
-                    Ok(self.io_registers[offset])
-                } else {
-                    Ok(0)
-                }
-            }
-            mapper::MemoryRegion::Unmapped => {
-                Ok(0xFF)
-            }
-        }
+
+    /// Renderiza um frame completo do vídeo (VDP) e retorna o framebuffer RGBA.
+    pub fn render_frame(&self) -> Vec<u32> {
+        self.bus.render_frame()
     }
-    
-    /// Escreve um byte na memória
-    pub fn write_byte(&mut self, address: u32, value: u8) -> Result<()> {
-        let mapped: mapper::MappedAddress = self.mapper.map_address(address);
-        
-        match mapped.region {
-            mapper::MemoryRegion::WorkRam => {
-                self.work_ram.write_byte(mapped.offset, value)
-            }
-            mapper::MemoryRegion::VideoRam => {
-                self.vram.write_byte(mapped.offset, value)
-            }
-            mapper::MemoryRegion::SoundRam => {
-                self.sound_ram.write_byte(mapped.offset, value)
-            }
-            mapper::MemoryRegion::CartridgeRam => {
-                if let Some(cart) = &mut self.cartridge {
-                    cart.write_sram(mapped.offset, value)
-                } else {
-                    Ok(())
-                }
-            }
-            mapper::MemoryRegion::IoRegisters => {
-                let offset: usize = mapped.offset as usize;
-                if offset < self.io_registers.len() {
-                    // Tratamento especial para alguns registros
-                    match offset {
-                        0x00..=0x01 => {
-                            // Registros somente leitura
-                            debug!("Attempt to write read-only IO register {:02X}", offset);
-                        }
-                        0x11 => {
-                            // TMSS register - precisa de tratamento especial
-                            if value & 0x01 != 0 {
-                                debug!("TMSS lock enabled");
-                            }
-                            self.io_registers[offset] = value;
-                        }
-                        _ => {
-                            self.io_registers[offset] = value;
-                            trace!("IO write: {:02X} = {:02X}", offset, value);
-                        }
-                    }
-                }
-                Ok(())
-            }
-            mapper::MemoryRegion::CartridgeRom => {
-                // Tentativa de escrever em ROM - pode ser mapeamento de banco
-                if let Some(cart) = &mut self.cartridge {
-                    cart.handle_bank_switch(mapped.offset, value)?;
-                }
-                Ok(())
-            }
-            _ => {
-                // Regiões não escritas (BIOS, unmapped)
-                Ok(())
-            }
-        }
+
+    // =====================================================
+    // DIAGNÓSTICO
+    // =====================================================
+
+    /// Retorna o estado atual da VRAM (para debug).
+    pub fn dump_vram(&self) -> Vec<u8> {
+        let vdp = self.bus.vdp.lock().unwrap();
+        vdp.vram.clone()
     }
-    
-    /// Lê uma palavra (16 bits)
-    pub fn read_word(&self, address: u32) -> Result<u16> {
-        // Alinhamento de palavra no 68000
-        if address & 1 != 0 {
-            warn!("Unaligned word read at {:08X}", address);
-        }
-        
-        let high: u16 = self.read_byte(address)? as u16;
-        let low: u16 = self.read_byte(address.wrapping_add(1))? as u16;
-        Ok((high << 8) | low)
+
+    /// Retorna o estado da CRAM (paleta de cores).
+    pub fn dump_cram(&self) -> Vec<u16> {
+        let vdp = self.bus.vdp.lock().unwrap();
+        vdp.cram.data.clone()
     }
-    
-    /// Escreve uma palavra (16 bits)
-    pub fn write_word(&mut self, address: u32, value: u16) -> Result<()> {
-        if address & 1 != 0 {
-            warn!("Unaligned word write at {:08X}", address);
-        }
-        
-        self.write_byte(address, (value >> 8) as u8)?;
-        self.write_byte(address.wrapping_add(1), value as u8)?;
-        Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::mapper::MapperType;
+
+    #[test]
+    fn test_memory_read_write() {
+        let mem = Memory::new(vec![0xAA, 0xBB, 0xCC, 0xDD], 64 * 1024, MapperType::Standard, 44100);
+
+        mem.write8(0xFF0000, 0x42);
+        let val = mem.read8(0xFF0000).unwrap();
+        assert_eq!(val, 0x42);
     }
-    
-    /// Lê uma palavra longa (32 bits)
-    pub fn read_long(&self, address: u32) -> Result<u32> {
-        if address & 1 != 0 {
-            warn!("Unaligned long read at {:08X}", address);
-        }
-        
-        let high: u32 = self.read_word(address)? as u32;
-        let low: u32 = self.read_word(address.wrapping_add(2))? as u32;
-        Ok((high << 16) | low)
+
+    #[test]
+    fn test_memory_vdp_integration() {
+        let mem = Memory::new(vec![0; 8], 64 * 1024, MapperType::Standard, 44100);
+        mem.write16(0xC00000, 0x1234);
+        let val = mem.read16(0xC00000).unwrap();
+        assert_eq!(val & 0xFF, 0x34);
     }
-    
-    /// Escreve uma palavra longa (32 bits)
-    pub fn write_long(&mut self, address: u32, value: u32) -> Result<()> {
-        if address & 1 != 0 {
-            warn!("Unaligned long write at {:08X}", address);
-        }
-        
-        self.write_word(address, (value >> 16) as u16)?;
-        self.write_word(address.wrapping_add(2), value as u16)?;
-        Ok(())
-    }
-    
-    /// Interface para o VDP acessar VRAM
-    pub fn vram(&self) -> &VideoRam {
-        &self.vram
-    }
-    
-    /// Interface mutável para o VDP acessar VRAM
-    pub fn vram_mut(&mut self) -> &mut VideoRam {
-        &mut self.vram
-    }
-    
-    /// Interface para o Z80 acessar Sound RAM
-    pub fn sound_ram(&self) -> &SoundRam {
-        &self.sound_ram
-    }
-    
-    /// Interface mutável para o Z80 acessar Sound RAM
-    pub fn sound_ram_mut(&mut self) -> &mut SoundRam {
-        &mut self.sound_ram
-    }
-    
-    /// Despeja um bloco de memória para debug
-    pub fn dump_memory(&self, start: u32, length: usize) -> Vec<u8> {
-        let mut result: Vec<u8> = Vec::with_capacity(length);
-        
-        for i in 0..length {
-            if let Ok(byte) = self.read_byte(start.wrapping_add(i as u32)) {
-                result.push(byte);
-            } else {
-                result.push(0xFF);
-            }
-        }
-        
-        result
+
+    #[test]
+    fn test_memory_frame_render() {
+        let mem = Memory::new(vec![0; 8], 64 * 1024, MapperType::Standard, 44100);
+        let frame = mem.render_frame();
+        assert!(!frame.is_empty());
     }
 }

@@ -1,191 +1,182 @@
-//! Mapeamento de memória do Genesis
+//! Mapper de memória do Mega Drive / Genesis
+//!
+//! Controla o roteamento de endereços entre ROM, SRAM e variações de mapeamento
+//! (SEGA, Codemasters, etc). Fornece suporte básico a EEPROM serial.
 
-use super::rom::Cartridge;
-use log::debug;
+use crate::memory::rom::Rom;
+use std::sync::{Arc, Mutex};
 
-/// Regiões de memória do Genesis
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum MemoryRegion {
-    Bios,           // BIOS (0x000000-0x0003FF)
-    WorkRam,        // RAM de trabalho (0xFF0000-0xFFFFFF)
-    VideoRam,       // VRAM (0xC00000-0xC00003)
-    SoundRam,       // RAM de som (0xA00000-0xA0FFFF)
-    CartridgeRom,   // ROM do cartucho (0x000000-0x3FFFFF)
-    CartridgeRam,   // RAM do cartucho (0x200000-0x20FFFF)
-    IoRegisters,    // Registradores de I/O (0xA10000-0xA10FFF)
-    Unmapped,       // Área não mapeada
+/// Tipos de mapper suportados
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapperType {
+    /// Mapeamento direto padrão (ROM linear de até 4 MB)
+    Standard,
+    /// Mapper SEGA — usado por jogos maiores (ex: Sonic 3, Virtua Racing)
+    Sega,
+    /// Mapper Codemasters — usado em jogos como "Micro Machines"
+    Codemasters,
+    /// Mapper com SRAM (bateria)
+    Sram,
+    /// Mapper com EEPROM (serial)
+    Eeprom,
 }
 
-/// Endereço mapeado
-#[derive(Debug, Clone, Copy)]
-pub struct MappedAddress {
-    pub region: MemoryRegion,
-    pub offset: u16,
+/// Estrutura principal de mapeamento de ROM/SRAM.
+pub struct Mapper {
+    pub rom: Arc<Mutex<Rom>>,
+    pub sram: Option<Vec<u8>>,
+    pub mapper_type: MapperType,
+    pub bank: usize, // banco ativo para mappers SEGA/Codemasters
 }
 
-/// Mapeador de memória do Genesis
-pub struct MemoryMapper {
-    /// TMSS lock (para consoles com TMSS)
-    tmss_locked: bool,
-    
-    /// Configuração de mapeamento
-    mapping_config: MappingConfig,
-}
+impl Mapper {
+    /// Cria um novo mapper com a ROM e tipo desejado.
+    pub fn new(rom: Rom, mapper_type: MapperType) -> Self {
+        let sram = match mapper_type {
+            MapperType::Sram => Some(vec![0; 0x10000]), // 64KB de SRAM
+            _ => None,
+        };
 
-/// Configuração de mapeamento
-#[derive(Debug, Clone)]
-struct MappingConfig {
-    cartridge_start: u32,
-    cartridge_end: u32,
-    sram_start: u32,
-    sram_end: u32,
-    sram_enabled: bool,
-}
-
-impl MemoryMapper {
-    /// Cria um novo mapeador
-    pub fn new() -> Self {
         Self {
-            tmss_locked: false,
-            mapping_config: MappingConfig {
-                cartridge_start: 0x000000,
-                cartridge_end: 0x3FFFFF,
-                sram_start: 0x200000,
-                sram_end: 0x20FFFF,
-                sram_enabled: false,
-            },
+            rom: Arc::new(Mutex::new(rom)),
+            sram,
+            mapper_type,
+            bank: 0,
         }
     }
-    
-    /// Configura o mapeamento baseado no cartucho
-    pub fn configure(&mut self, cartridge: &Cartridge) {
-        let header: &crate::memory::RomHeader = cartridge.get_header();
-        
-        debug!("Configuring memory mapper for cartridge:");
-        debug!("  ROM: {}KB", header.rom_size_kb);
-        debug!("  RAM: {}KB", header.ram_size_kb);
-        
-        // Ativa SRAM se o cartucho tiver
-        self.mapping_config.sram_enabled = header.ram_size_kb > 0;
-        
-        if header.ram_size_kb > 0 {
-            debug!("SRAM enabled at {:08X}-{:08X}", 
-                   self.mapping_config.sram_start,
-                   self.mapping_config.sram_end);
+
+    /// Lê um byte (8 bits) de ROM ou SRAM conforme o tipo de mapper.
+    pub fn read8(&self, addr: u32) -> u8 {
+        match self.mapper_type {
+            MapperType::Standard => self.read_rom(addr),
+            MapperType::Sega => self.read_sega(addr),
+            MapperType::Codemasters => self.read_codemasters(addr),
+            MapperType::Sram => self.read_sram(addr),
+            MapperType::Eeprom => self.read_eeprom(addr),
         }
     }
-    
-    /// Mapeia um endereço de 24 bits para uma região
-    pub fn map_address(&self, address: u32) -> MappedAddress {
-        let addr_24bit: u32 = address & 0x00FFFFFF; // Endereços são 24 bits no Genesis
-        
-        match addr_24bit {
-            // BIOS/TMSS Area
-            0x000000..=0x0003FF => {
-                if self.tmss_locked {
-                    // TMSS mostra "LICENSED BY SEGA" quando bloqueado
-                    MappedAddress {
-                        region: MemoryRegion::Bios,
-                        offset: (addr_24bit - 0x000000) as u16,
-                    }
-                } else {
-                    // Normalmente mapeado para cartucho
-                    self.map_cartridge_address(addr_24bit)
-                }
+
+    /// Escrita de byte (8 bits) — SRAM, EEPROM ou troca de banco.
+    pub fn write8(&mut self, addr: u32, value: u8) {
+        match self.mapper_type {
+            MapperType::Sram => self.write_sram(addr, value),
+            MapperType::Eeprom => self.write_eeprom(addr, value),
+            MapperType::Sega => self.handle_sega_bank_switch(addr, value),
+            MapperType::Codemasters => self.handle_codemasters_bank_switch(addr, value),
+            _ => {}
+        }
+    }
+
+    /// Leitura direta de ROM padrão (espelhada até 4MB)
+    fn read_rom(&self, addr: u32) -> u8 {
+        let rom = self.rom.lock().unwrap();
+        rom.read8(addr % rom.size() as u32)
+    }
+
+    /// Leitura de ROM com mapeamento SEGA (banco de 512 KB)
+    fn read_sega(&self, addr: u32) -> u8 {
+        let rom = self.rom.lock().unwrap();
+        let bank_offset = (self.bank * 0x80000) as u32;
+        let offset = (addr % 0x80000) + bank_offset;
+        rom.read8(offset % rom.size() as u32)
+    }
+
+    /// Leitura Codemasters (banco de 256 KB)
+    fn read_codemasters(&self, addr: u32) -> u8 {
+        let rom = self.rom.lock().unwrap();
+        let bank_offset = (self.bank * 0x40000) as u32;
+        let offset = (addr % 0x40000) + bank_offset;
+        rom.read8(offset % rom.size() as u32)
+    }
+
+    /// Leitura com SRAM (faixa 0x200000–0x20FFFF)
+    fn read_sram(&self, addr: u32) -> u8 {
+        if (0x200000..=0x20FFFF).contains(&addr) {
+            if let Some(ref sram) = self.sram {
+                return sram[(addr as usize - 0x200000) % sram.len()];
             }
-            
-            // Cartridge ROM Area (0x000000-0x1FFFFF and 0x210000-0x3FFFFF)
-            0x000000..=0x1FFFFF | 0x210000..=0x3FFFFF => {
-                self.map_cartridge_address(addr_24bit)
-            }
-            
-            // Cartridge RAM/SRAM Area (0x200000-0x20FFFF)
-            0x200000..=0x20FFFF => {
-                if self.mapping_config.sram_enabled {
-                    MappedAddress {
-                        region: MemoryRegion::CartridgeRam,
-                        offset: (addr_24bit - 0x200000) as u16,
-                    }
-                } else {
-                    // Sem SRAM, volta para ROM
-                    self.map_cartridge_address(addr_24bit)
-                }
-            }
-            
-            // I/O Registers (0xA10000-0xA10FFF)
-            0xA10000..=0xA10FFF => {
-                let offset = (addr_24bit - 0xA10000) as u16;
-                MappedAddress {
-                    region: MemoryRegion::IoRegisters,
-                    offset,
-                }
-            }
-            
-            // Z80 Address Space / Sound RAM (0xA00000-0xA0FFFF)
-            0xA00000..=0xA0FFFF => {
-                if addr_24bit <= 0xA01FFF {
-                    // Sound RAM (8KB)
-                    MappedAddress {
-                        region: MemoryRegion::SoundRam,
-                        offset: (addr_24bit - 0xA00000) as u16,
-                    }
-                } else {
-                    // Z80 I/O ou não mapeado
-                    MappedAddress {
-                        region: MemoryRegion::Unmapped,
-                        offset: 0,
-                    }
-                }
-            }
-            
-            // VDP Registers (0xC00000-0xC0001F)
-            0xC00000..=0xC0001F => {
-                // Acesso ao VDP - tratado pelo módulo VDP
-                MappedAddress {
-                    region: MemoryRegion::VideoRam,
-                    offset: (addr_24bit - 0xC00000) as u16,
-                }
-            }
-            
-            // Work RAM (0xFF0000-0xFFFFFF)
-            0xFF0000..=0xFFFFFF => {
-                MappedAddress {
-                    region: MemoryRegion::WorkRam,
-                    offset: (addr_24bit - 0xFF0000) as u16,
-                }
-            }
-            
-            // Unmapped areas
-            _ => {
-                MappedAddress {
-                    region: MemoryRegion::Unmapped,
-                    offset: 0,
-                }
+        }
+        self.read_rom(addr)
+    }
+
+    /// Escrita na SRAM (com bateria)
+    fn write_sram(&mut self, addr: u32, value: u8) {
+        if (0x200000..=0x20FFFF).contains(&addr) {
+            if let Some(ref mut sram) = self.sram {
+                let offset = (addr as usize - 0x200000) % sram.len();
+                sram[offset] = value;
             }
         }
     }
-    
-    /// Mapeia endereço da área do cartucho
-    fn map_cartridge_address(&self, address: u32) -> MappedAddress {
-        if address >= self.mapping_config.sram_start && 
-           address <= self.mapping_config.sram_end &&
-           self.mapping_config.sram_enabled {
-            
-            MappedAddress {
-                region: MemoryRegion::CartridgeRam,
-                offset: (address - self.mapping_config.sram_start) as u16,
-            }
+
+    /// Leitura simulada de EEPROM serial (faixa 0x200000–0x200001)
+    fn read_eeprom(&self, addr: u32) -> u8 {
+        if addr & 1 == 0 {
+            // bit de status
+            0xFF
         } else {
-            MappedAddress {
-                region: MemoryRegion::CartridgeRom,
-                offset: address as u16, // Limite de 64KB, mas o cartucho lida com bank switching
-            }
+            0x00
         }
     }
-    
-    /// Ativa/desativa TMSS lock
-    pub fn set_tmss_lock(&mut self, locked: bool) {
-        self.tmss_locked = locked;
-        debug!("TMSS lock {}", if locked { "enabled" } else { "disabled" });
+
+    /// Escrita simulada de EEPROM serial (não persiste, apenas emula ACK)
+    fn write_eeprom(&mut self, _addr: u32, _value: u8) {
+        // EEPROM fictícia — sem armazenamento persistente.
+    }
+
+    /// Troca de banco SEGA — escrita em 0xA130F1 define banco ativo
+    fn handle_sega_bank_switch(&mut self, addr: u32, value: u8) {
+        if addr == 0xA130F1 {
+            self.bank = (value & 0x07) as usize;
+        }
+    }
+
+    /// Troca de banco Codemasters — escrita em 0x0000 controla o banco
+    fn handle_codemasters_bank_switch(&mut self, addr: u32, value: u8) {
+        if addr & 0x400000 == 0x000000 {
+            self.bank = (value & 0x0F) as usize;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::rom::Rom;
+
+    #[test]
+    fn test_standard_mapper_reads_rom() {
+        let data = (0..255).collect::<Vec<u8>>();
+        let rom = Rom::new(data.clone());
+        let mapper = Mapper::new(rom, MapperType::Standard);
+        assert_eq!(mapper.read8(0x10), 0x10);
+        assert_eq!(mapper.read8(0x200000), data[0]);
+    }
+
+    #[test]
+    fn test_sram_write_and_read() {
+        let data = vec![0; 256];
+        let rom = Rom::new(data);
+        let mut mapper = Mapper::new(rom, MapperType::Sram);
+        mapper.write8(0x200000, 0xAA);
+        assert_eq!(mapper.read8(0x200000), 0xAA);
+    }
+
+    #[test]
+    fn test_sega_bank_switch() {
+        let data = (0..255).cycle().take(0x100000).collect::<Vec<u8>>();
+        let rom = Rom::new(data);
+        let mut mapper = Mapper::new(rom, MapperType::Sega);
+        mapper.handle_sega_bank_switch(0xA130F1, 3);
+        assert_eq!(mapper.bank, 3);
+    }
+
+    #[test]
+    fn test_codemasters_bank_switch() {
+        let data = vec![0; 0x80000];
+        let rom = Rom::new(data);
+        let mut mapper = Mapper::new(rom, MapperType::Codemasters);
+        mapper.handle_codemasters_bank_switch(0x0000, 2);
+        assert_eq!(mapper.bank, 2);
     }
 }

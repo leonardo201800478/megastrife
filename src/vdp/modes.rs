@@ -1,43 +1,23 @@
-//! Implementações específicas dos modos de vídeo
-
-use super::*;
-
-impl VDP {
-    /// Renderiza frame completo no Modo 5
-    pub fn render_mode5_frame(&mut self) -> Result<()> {
-        for line in 0..GENESIS_HEIGHT as u16 {
-            self.render_mode5_scanline(line)?;
-        }
-        Ok(())
-    }
-
-    /// Renderiza frame completo no Modo 4
-    pub fn render_mode4_frame(&mut self) -> Result<()> {
-        for line in 0..GENESIS_HEIGHT as u16 {
-            self.render_mode4_scanline(line)?;
-        }
-        Ok(())
-    }
+/// Modos de exibição do VDP
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VdpMode {
+    Mode32Cell, // 256x224
+    Mode40Cell, // 320x224
 }
 
-// Implementações específicas do Modo 4
-impl VDP {
-    fn render_mode4_scanline(&mut self, line: u16) -> Result<()> {
-        // Similar ao Mode5 mas com resolução 256x224
-        for x in 0..256 {
-            let mut color: u32 = 0;
-
-            // Lógica de renderização similar
-            if self.layer_enable.background_a {
-                color = self.render_background_pixel(x, line, 0, true)?;
-            }
-
-            let idx: usize = (line as usize * 256) + x as usize;
-            if idx < self.framebuffer.pixels.len() {
-                self.framebuffer.pixels[idx] = color;
-            }
+impl VdpMode {
+    pub fn from_registers(r: &crate::vdp::registers::VdpRegisters) -> Self {
+        if r.mode_40_cell() {
+            VdpMode::Mode40Cell
+        } else {
+            VdpMode::Mode32Cell
         }
+    }
 
-        Ok(())
+    pub fn resolution(&self) -> (u32, u32) {
+        match self {
+            VdpMode::Mode32Cell => (256, 224),
+            VdpMode::Mode40Cell => (320, 224),
+        }
     }
 }
